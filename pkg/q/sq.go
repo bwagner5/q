@@ -1,4 +1,4 @@
-package sq
+package q
 
 import (
 	"context"
@@ -16,13 +16,13 @@ const (
 )
 
 var (
-	DrainTimeoutErr     = fmt.Errorf("timeout waiting for queue to drain")
-	NotAcceptingWorkErr = fmt.Errorf("work queue is not Active so no work is being accepted")
-	WorkQueueFullErr    = fmt.Errorf("work queue is full, try again soon or increase buffer sizes")
-	UnableToStartErr    = fmt.Errorf("work queue cannot be started")
-)
-
-var (
+	DrainTimeoutErr        = fmt.Errorf("timeout waiting for queue to drain")
+	NotAcceptingWorkErr    = fmt.Errorf("work queue is not Active so no work is being accepted")
+	WorkSimpleQueueFullErr = fmt.Errorf("work queue is full, try again soon or increase buffer sizes")
+	UnableToStartErr       = fmt.Errorf("work queue cannot be started")
+	// IgnoreResultErr can be used by a user provided processor func to instruct the queue to not place the result or error on a specific queue.
+	// This allows some results to be ignored without configuring all results to be ignored at the queue level.
+	IgnoreResultErr      = fmt.Errorf("ignore result")
 	DefaultResultsPolicy = ResultsPolicyQueue
 	DefaultRetryPolicy   = RetryPolicy{
 		MaxRetries:        2,
@@ -31,9 +31,9 @@ var (
 	}
 )
 
-// Queue is a generic and parallel work queue that buffers inputs and outputs of a provided Processor function.
-// Use sq.New() to instantiate the Queue.
-type Queue[T, R any] struct {
+// SimpleQueue is a generic and parallel work queue that buffers inputs and outputs of a provided Processor function.
+// Use sq.New() to instantiate the SimpleQueue.
+type SimpleQueue[T, R any] struct {
 	// stateCode indicates the work queue's current mode
 	stateCode uint8
 	// input is the channel/queue that stores pending work items for processing
@@ -42,8 +42,8 @@ type Queue[T, R any] struct {
 	resultsQueue chan R
 	// errorsQueue is the channel that stores processing errors
 	errorsQueue chan error
-	// wqCtx is the work queue's context used for shutting down the queue.
-	wqCtx context.Context
+	// qCtx is the work queue's context used for shutting down the queue.
+	qCtx context.Context
 	// cancel is a context cancel func used for shutting down the work queue and processors
 	cancel context.CancelFunc
 	// processorWaitGroup tracks the concurrent processors and is used to make sure all processors exit gracefully on Stop()
@@ -54,10 +54,10 @@ type Queue[T, R any] struct {
 	// mu is a lock for initialization and State changes
 	mu sync.RWMutex
 
-	options Options[T, R]
+	options SimpleOptions[T, R]
 }
 
-type Options[T, R any] struct {
+type SimpleOptions[T, R any] struct {
 	// Concurrency is the number of processor loops running that consume from the input channel/queue
 	Concurrency int
 	// InputQueueSize is the buffer size for the input channel/queue
@@ -66,9 +66,9 @@ type Options[T, R any] struct {
 	ResultsQueueSize int
 	// ErrorsQueueSize is the buffer size for the errors channel/queue
 	ErrorsQueueSize int
-	// ResultsPolicy determines how to handle results from the processor func
+	// ResultsPolicy determines how to handle results from the processor func. This includes errors
 	ResultsPolicy *ResultsPolicy
-
+	// RetryPolicy configures how to handle failures, retries, and backoff
 	RetryPolicy *RetryPolicy
 	// ProcessorFunc is a user-defined processing func
 	ProcessorFunc ProcessorFunc[T, R]
@@ -81,53 +81,31 @@ var (
 	ResultsPolicyDrop  = ResultsPolicy("DROP")
 )
 
-type RetryStrategy string
-
-var (
-	RetryStrategyExponentialBackoff = RetryStrategy("EXPONENTIAL BACKOFF")
-	RetryStrategyImmediateRequeue   = RetryStrategy("IMMEDIATE REQUEUE")
-)
-
-type RetryPolicy struct {
-	// MaxRetries is how many times a work item input can be requeued for a retry.
-	// The Processor func must return an error for the work item to be considered for retry
-	MaxRetries int
-	// Strategy determines how retries are requeued for reprocessing
-	Strategy RetryStrategy
-	// InitialRetryDelay is the time to wait before retrying on the first attempt.
-	// The Strategy will affect they delay after the first retry, but still based on the initial delay.
-	InitialRetryDelay time.Duration
-}
-
 // ProcessorFunc is a generic, user-provided processing func for the input items added to the queue
 type ProcessorFunc[T, R any] func(context.Context, T) (R, error)
 
 // New creates a concurrent work queue with sane defaults
-func New[T, R any](concurrency, maxRetries, queueSize int, processor ProcessorFunc[T, R]) *Queue[T, R] {
-	options := Options[T, R]{
-		Concurrency:   concurrency,
-		ProcessorFunc: processor,
-		RetryPolicy: &RetryPolicy{
-			MaxRetries: maxRetries,
-			Strategy:   RetryStrategyExponentialBackoff,
-		},
+func NewSimpleQueue[T, R any](concurrency, maxRetries, queueSize int, processor ProcessorFunc[T, R]) *SimpleQueue[T, R] {
+	options := SimpleOptions[T, R]{
+		Concurrency:      concurrency,
+		ProcessorFunc:    processor,
 		ResultsPolicy:    &ResultsPolicyQueue,
 		InputQueueSize:   queueSize,
 		ResultsQueueSize: queueSize,
 		ErrorsQueueSize:  queueSize,
 	}
-	return NewFromOptions(options)
+	return NewFromSimpleOptions(options)
 }
 
-// NewFromOptions creates a concurrent work queue with a custom configuration
-func NewFromOptions[T, R any](options Options[T, R]) *Queue[T, R] {
-	return &Queue[T, R]{
+// NewFromSimpleOptions creates a concurrent simple work queue with a custom configuration
+func NewFromSimpleOptions[T, R any](options SimpleOptions[T, R]) *SimpleQueue[T, R] {
+	return &SimpleQueue[T, R]{
 		stateCode: StateInitialized,
-		options:   setDefaultOptions(options),
+		options:   setDefaultSimpleOptions(options),
 	}
 }
 
-func setDefaultOptions[T, R any](options Options[T, R]) Options[T, R] {
+func setDefaultSimpleOptions[T, R any](options SimpleOptions[T, R]) SimpleOptions[T, R] {
 	if options.ResultsPolicy == nil {
 		options.ResultsPolicy = &DefaultResultsPolicy
 	}
@@ -138,7 +116,7 @@ func setDefaultOptions[T, R any](options Options[T, R]) Options[T, R] {
 }
 
 // Start executes processors based on the queue options
-func (wq *Queue[T, R]) Start(ctx context.Context) error {
+func (wq *SimpleQueue[T, R]) Start(ctx context.Context) error {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 
@@ -153,7 +131,7 @@ func (wq *Queue[T, R]) Start(ctx context.Context) error {
 
 	wqCtx, cancel := context.WithCancel(ctx)
 	wq.cancel = cancel
-	wq.wqCtx = wqCtx
+	wq.qCtx = wqCtx
 
 	if wq.options.ResultsQueueSize > 0 {
 		wq.resultsQueue = make(chan R, wq.options.ResultsQueueSize)
@@ -189,14 +167,17 @@ func (wq *Queue[T, R]) Start(ctx context.Context) error {
 }
 
 // executer wraps the user-provided processor func to handle work queue accounting like metadata, retries, and result packaging.
-func (wq *Queue[T, R]) executer(ctx context.Context, workItem T) {
+func (wq *SimpleQueue[T, R]) executer(ctx context.Context, workItem T) {
 	defer wq.workItemWaitGroup.Done()
 
 	output, err := wq.options.ProcessorFunc(ctx, workItem)
+	if err == IgnoreResultErr {
+		return
+	}
 	wq.sendResult(ctx, output, err)
 }
 
-func (wq *Queue[T, R]) sendResult(ctx context.Context, output R, err error) {
+func (wq *SimpleQueue[T, R]) sendResult(ctx context.Context, output R, err error) {
 	if wq.options.ResultsQueueSize <= 0 {
 		return
 	}
@@ -235,9 +216,9 @@ func (wq *Queue[T, R]) sendResult(ctx context.Context, output R, err error) {
 	}
 }
 
-func (wq *Queue[T, R]) add(workItem T) error {
+func (wq *SimpleQueue[T, R]) add(workItem T) error {
 	select {
-	case <-wq.wqCtx.Done():
+	case <-wq.qCtx.Done():
 		return NotAcceptingWorkErr
 	default:
 		wq.workItemWaitGroup.Add(1)
@@ -245,17 +226,28 @@ func (wq *Queue[T, R]) add(workItem T) error {
 		case wq.inputQueue <- workItem:
 		default:
 			wq.workItemWaitGroup.Done()
-			return WorkQueueFullErr
+			return WorkSimpleQueueFullErr
 		}
 	}
 	return nil
 }
 
-// Add enqueues an item to the work queue for processing
-func (wq *Queue[T, R]) Add(item T) error {
+// Add enqueues an item to the work queue for processing if the queue is in an Active state.
+func (wq *SimpleQueue[T, R]) Add(item T) error {
 	wq.mu.RLock()
 	defer wq.mu.RUnlock()
 	if wq.stateCode != StateActive {
+		return NotAcceptingWorkErr
+	}
+
+	return wq.add(item)
+}
+
+// ForceAdd enqueues an item to the work queue for processing if the queue is Active OR Draining.
+func (wq *SimpleQueue[T, R]) ForceAdd(item T) error {
+	wq.mu.RLock()
+	defer wq.mu.RUnlock()
+	if wq.stateCode != StateActive && wq.stateCode != StateDraining {
 		return NotAcceptingWorkErr
 	}
 
@@ -269,13 +261,13 @@ func (wq *Queue[T, R]) Add(item T) error {
 //	2: after the initialDelay duration
 //	3: 2x the initialDelay duration
 //
-// If the queue is still full, a WorkQueueFullErr is returned
-func (wq *Queue[T, R]) AddWithBackOff(item T, initialDelay time.Duration, maxAttempts int) error {
+// If the queue is still full, a WorkSimpleQueueFullErr is returned
+func (wq *SimpleQueue[T, R]) AddWithBackOff(item T, initialDelay time.Duration, maxAttempts int) error {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := wq.Add(item); err != nil {
-			if err == WorkQueueFullErr {
+			if err == WorkSimpleQueueFullErr {
 				if attempt == maxAttempts {
-					return WorkQueueFullErr
+					return WorkSimpleQueueFullErr
 				}
 				time.Sleep(time.Duration(attempt) * initialDelay)
 				continue
@@ -285,11 +277,11 @@ func (wq *Queue[T, R]) AddWithBackOff(item T, initialDelay time.Duration, maxAtt
 		}
 		return nil
 	}
-	return WorkQueueFullErr
+	return WorkSimpleQueueFullErr
 }
 
 // MustAdd tries to Add an item to the work queue for processing, but if an error occurs, panics.
-func (wq *Queue[T, R]) MustAdd(item T) {
+func (wq *SimpleQueue[T, R]) MustAdd(item T) {
 	if err := wq.Add(item); err != nil {
 		panic(err)
 	}
@@ -299,7 +291,7 @@ func (wq *Queue[T, R]) MustAdd(item T) {
 // If the work queue is active but empty, Result() can block
 // until new items are added and processed OR the work queue is Stopped.
 // The second argument follows the "comma ok" pattern and signifies the results queue has been full drained and stopped.
-func (wq *Queue[T, R]) Result() (*R, bool) {
+func (wq *SimpleQueue[T, R]) Result() (*R, bool) {
 	if wq.options.ResultsQueueSize <= 0 {
 		return nil, false
 	}
@@ -311,7 +303,7 @@ func (wq *Queue[T, R]) Result() (*R, bool) {
 }
 
 // Results is a range iterator that returns processed work item results
-func (wq *Queue[T, R]) Results() func(func(*R) bool) {
+func (wq *SimpleQueue[T, R]) Results() func(func(*R) bool) {
 	return func(yield func(r *R) bool) {
 		for {
 			r, ok := wq.Result()
@@ -326,7 +318,7 @@ func (wq *Queue[T, R]) Results() func(func(*R) bool) {
 // If the work queue is active but empty, Error() can block
 // until new items are added and processed OR the work queue is Stopped.
 // The second argument follows the "comma ok" pattern and signifies the errors queue has been full drained and stopped.
-func (wq *Queue[T, R]) Error() (error, bool) {
+func (wq *SimpleQueue[T, R]) Error() (error, bool) {
 	if wq.options.ErrorsQueueSize <= 0 {
 		return nil, false
 	}
@@ -338,7 +330,7 @@ func (wq *Queue[T, R]) Error() (error, bool) {
 }
 
 // Errors is a range iterator that returns processed work item errors
-func (wq *Queue[T, R]) Errors() func(func(error) bool) {
+func (wq *SimpleQueue[T, R]) Errors() func(func(error) bool) {
 	return func(yield func(err error) bool) {
 		for {
 			err, ok := wq.Error()
@@ -352,7 +344,7 @@ func (wq *Queue[T, R]) Errors() func(func(error) bool) {
 // Drain closes the work queue for new work, but the remaining work is processed, including any necessary retries.
 // A successful Drain will transition from Active -> Draining -> Stopping -> Stopped.
 // Drain is blocking until the work queue is empty or the timeout elapses.
-func (wq *Queue[T, R]) Drain(timeout time.Duration) error {
+func (wq *SimpleQueue[T, R]) Drain(timeout time.Duration) error {
 	wq.setStateCode(StateDraining)
 
 	timer := time.NewTimer(timeout)
@@ -384,7 +376,7 @@ func (wq *Queue[T, R]) Drain(timeout time.Duration) error {
 // Work Items in the queue are also cleared, but Results are retained.
 // The integer return is the number of work items not processed from the input queue.
 // Make sure that the Processor func provided handles the received context.Context or Stop() could hang forever.
-func (wq *Queue[T, R]) Stop() int {
+func (wq *SimpleQueue[T, R]) Stop() int {
 	wq.setStateCode(StateStopping)
 
 	close(wq.inputQueue)
@@ -400,7 +392,7 @@ func (wq *Queue[T, R]) Stop() int {
 	return unprocessed
 }
 
-func (wq *Queue[T, R]) workItemsDrained() <-chan struct{} {
+func (wq *SimpleQueue[T, R]) workItemsDrained() <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		wq.workItemWaitGroup.Wait()
@@ -409,7 +401,7 @@ func (wq *Queue[T, R]) workItemsDrained() <-chan struct{} {
 	return done
 }
 
-func (wq *Queue[T, R]) processorsExited() <-chan struct{} {
+func (wq *SimpleQueue[T, R]) processorsExited() <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		wq.processorWaitGroup.Wait()
@@ -419,24 +411,24 @@ func (wq *Queue[T, R]) processorsExited() <-chan struct{} {
 }
 
 // StateCode returns the state code of the work queue
-func (wq *Queue[T, R]) StateCode() uint8 {
+func (wq *SimpleQueue[T, R]) StateCode() uint8 {
 	wq.mu.RLock()
 	defer wq.mu.RUnlock()
 	return wq.stateCode
 }
 
 // StateCodeDescription returns a string representation of the work queue State code
-func (wq *Queue[T, R]) StateCodeDescription() string {
+func (wq *SimpleQueue[T, R]) StateCodeDescription() string {
 	return wq.stateCodeDescription(wq.StateCode())
 }
 
-func (wq *Queue[T, R]) setStateCode(State uint8) {
+func (wq *SimpleQueue[T, R]) setStateCode(State uint8) {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 	wq.stateCode = State
 }
 
-func (wq *Queue[T, R]) stateCodeDescription(state uint8) string {
+func (wq *SimpleQueue[T, R]) stateCodeDescription(state uint8) string {
 	switch state {
 	case StateInitialized:
 		return fmt.Sprintf("%d: Initialized", StateInitialized)

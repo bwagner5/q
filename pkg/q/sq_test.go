@@ -1,4 +1,4 @@
-package wq_test
+package q_test
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwagner5/wq/pkg/wq"
+	"github.com/bwagner5/q/pkg/q"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,11 +20,11 @@ var (
 	}
 )
 
-func TestWQ(t *testing.T) {
+func TestSQ(t *testing.T) {
 
 	t.Run("Simple Work Queue", func(t *testing.T) {
 		ctx := context.Background()
-		queue := wq.New(1, 0, 5, echoProcessor)
+		queue := q.NewSimpleQueue(2, 0, 5, echoProcessor)
 		queue.Start(ctx)
 
 		for i := 1; i <= 5; i++ {
@@ -37,13 +37,18 @@ func TestWQ(t *testing.T) {
 		for i := 1; i <= 5; i++ {
 			result, ok := queue.Result()
 			require.Equal(t, true, ok)
-			require.Equal(t, i, result.Output)
+			require.Equal(t, i, *result)
 		}
+
+		for range queue.Errors() {
+			require.Fail(t, "should not have received any errors during processing")
+		}
+
 	})
 
-	t.Run("Retries", func(t *testing.T) {
+	t.Run("Errors", func(t *testing.T) {
 		ctx := context.Background()
-		queue := wq.New(1, 1, 5, errProcessor)
+		queue := q.NewSimpleQueue(2, 1, 5, errProcessor)
 		queue.Start(ctx)
 
 		for i := 1; i <= 5; i++ {
@@ -53,53 +58,49 @@ func TestWQ(t *testing.T) {
 		err := queue.Drain(time.Second * 5)
 		require.NoError(t, err)
 
-		for i := 1; i <= 5; i++ {
-			result, ok := queue.Result()
-			require.Equal(t, true, ok)
-			require.Equal(t, 2, result.Metadata.Attempt())
-			require.Equal(t, 1, result.Metadata.Retries())
-			require.Equal(t, fmt.Errorf("error"), result.Error)
+		var errs []error
+		for err := range queue.Errors() {
+			errs = append(errs, err)
+			require.Equal(t, fmt.Errorf("error"), err)
 		}
+		require.Len(t, errs, 5)
 	})
 }
 
-func Benchmark(b *testing.B) {
+func BenchmarkSimpleQueue(b *testing.B) {
 
 	type QueueBenchmarks[T, R any] struct {
 		name    string
-		options wq.Options[T, R]
+		options q.SimpleOptions[T, R]
 	}
 
 	queueOpts := []QueueBenchmarks[int, int]{
 		{
 			name: "Default Queue w/ Results Queueing",
-			options: wq.Options[int, int]{
+			options: q.SimpleOptions[int, int]{
 				Concurrency:      4,
 				InputQueueSize:   100,
 				ResultsQueueSize: 100,
-				ResultsPolicy:    &wq.ResultsPolicyQueue,
-				RetryPolicy:      &wq.DefaultRetryPolicy,
+				ResultsPolicy:    &q.ResultsPolicyQueue,
 				ProcessorFunc:    echoProcessor,
 			},
 		},
 		{
 			name: "Queue w/ Result Dropping",
-			options: wq.Options[int, int]{
+			options: q.SimpleOptions[int, int]{
 				Concurrency:      4,
 				InputQueueSize:   100,
 				ResultsQueueSize: 100,
-				ResultsPolicy:    &wq.ResultsPolicyDrop,
-				RetryPolicy:      &wq.DefaultRetryPolicy,
+				ResultsPolicy:    &q.ResultsPolicyDrop,
 				ProcessorFunc:    echoProcessor,
 			},
 		},
 		{
 			name: "Queue w/ No Results",
-			options: wq.Options[int, int]{
+			options: q.SimpleOptions[int, int]{
 				Concurrency:      4,
 				InputQueueSize:   100,
 				ResultsQueueSize: 0,
-				RetryPolicy:      &wq.DefaultRetryPolicy,
 				ProcessorFunc:    echoProcessor,
 			},
 		},
@@ -107,7 +108,7 @@ func Benchmark(b *testing.B) {
 
 	for _, opts := range queueOpts {
 		b.Run(opts.name, func(b *testing.B) {
-			queue := wq.NewFromOptions(opts.options)
+			queue := q.NewFromSimpleOptions(opts.options)
 			queue.Start(b.Context())
 			b.ResetTimer()
 
@@ -122,10 +123,6 @@ func Benchmark(b *testing.B) {
 			})
 
 			require.NoError(b, queue.Drain(time.Second*5))
-			status := queue.Status()
-			b.ReportMetric(float64(status.MinLatency.Nanoseconds()), "MinLatency(ns)")
-			b.ReportMetric(float64(status.MaxLatency.Nanoseconds()), "MaxLatency(ns)")
-			b.ReportMetric(float64(status.AvgLatency.Nanoseconds()), "AvgLatency(ns)")
 		})
 	}
 }

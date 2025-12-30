@@ -7,14 +7,14 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/bwagner5/wq/pkg/wq"
+	"github.com/bwagner5/q/pkg/q"
 )
 
 func main() {
 	ctx := context.Background()
 
 	// configure the queue with basic options
-	q := wq.NewFromOptions(wq.Options[int, int]{
+	q := q.NewFromOptions(q.Options[int, int]{
 		Concurrency:      2,
 		InputQueueSize:   10,
 		ResultsQueueSize: 10,

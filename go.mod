@@ -1,4 +1,4 @@
-module github.com/bwagner5/wq
+module github.com/bwagner5/q
 
 go 1.24.5
 

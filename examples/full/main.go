@@ -8,14 +8,14 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/bwagner5/wq/pkg/wq"
+	"github.com/bwagner5/q/pkg/q"
 )
 
 func main() {
 	ctx := context.Background()
 
 	// configure the queue with basic options
-	q := wq.NewFromOptions(wq.Options[int, int]{
+	queue := q.NewFromOptions(q.Options[int, int]{
 		Concurrency:      2,
 		InputQueueSize:   10,
 		ResultsQueueSize: 10,
@@ -27,31 +27,31 @@ func main() {
 	})
 
 	// start the queue processors
-	if err := q.Start(ctx); err != nil {
+	if err := queue.Start(ctx); err != nil {
 		panic(err)
 	}
 
 	// consume the results in a separate go routine
 	go func() {
-		for r := range q.Results() {
+		for r := range queue.Results() {
 			fmt.Printf("Got Echo Result: %d -> %d in %s\n", r.Input, r.Output, r.Metadata.Latency())
 		}
 	}()
 
 	// add items to the work queue
 	for i := range 15 {
-		if err := q.AddWithBackOff(i, time.Second, 2); err != nil {
+		if err := queue.AddWithBackOff(i, time.Second, 2); err != nil {
 			fmt.Printf("Unable to add work item %d: %s\n", i, err)
 		}
 	}
 
 	// gracefully drain the work queue in 10 seconds
-	err := q.Drain(10 * time.Second)
+	err := queue.Drain(10 * time.Second)
 	if err != nil {
 		// if we can't drain in 10 seconds, then shutdown forcefully
-		if errors.Is(err, wq.DrainTimeoutErr) {
+		if errors.Is(err, q.DrainTimeoutErr) {
 			// see how many work items weren't processed due to a forceful shutdown
-			unprocessed := q.Stop()
+			unprocessed := queue.Stop()
 			fmt.Printf("Stopped Queue forcefully without processing %d work items\n", unprocessed)
 		} else {
 			panic(err)
@@ -62,6 +62,6 @@ func main() {
 
 	// print some stats about the queue processing
 	fmt.Printf("Stats: \n")
-	stats, _ := json.MarshalIndent(q.Status(), " ", "    ")
+	stats, _ := json.MarshalIndent(queue.Status(), " ", "    ")
 	fmt.Printf("%s\n", stats)
 }
