@@ -178,10 +178,10 @@ func NewFromOptions[T, R any](options Options[T, R]) *Queue[T, R] {
 
 func setDefaultOptions[T, R any](options Options[T, R]) Options[T, R] {
 	if options.ResultsPolicy == nil {
-		options.ResultsPolicy = &DefaultResultsPolicy
+		options.ResultsPolicy = &defaultResultsPolicy
 	}
 	if options.RetryPolicy == nil {
-		options.RetryPolicy = &DefaultRetryPolicy
+		options.RetryPolicy = &defaultRetryPolicy
 	}
 	return options
 }

@@ -23,8 +23,8 @@ var (
 	// IgnoreResultErr can be used by a user provided processor func to instruct the queue to not place the result or error on a specific queue.
 	// This allows some results to be ignored without configuring all results to be ignored at the queue level.
 	IgnoreResultErr      = fmt.Errorf("ignore result")
-	DefaultResultsPolicy = ResultsPolicyQueue
-	DefaultRetryPolicy   = RetryPolicy{
+	defaultResultsPolicy = ResultsPolicyQueue
+	defaultRetryPolicy   = RetryPolicy{
 		MaxRetries:        2,
 		Strategy:          RetryStrategyExponentialBackoff,
 		InitialRetryDelay: 1 * time.Second,
@@ -107,7 +107,7 @@ func NewFromSimpleOptions[T, R any](options SimpleOptions[T, R]) *SimpleQueue[T,
 
 func setDefaultSimpleOptions[T, R any](options SimpleOptions[T, R]) SimpleOptions[T, R] {
 	if options.ResultsPolicy == nil {
-		options.ResultsPolicy = &DefaultResultsPolicy
+		options.ResultsPolicy = &defaultResultsPolicy
 	}
 	return options
 }
